@@ -74,6 +74,3 @@ R · R Markdown · randomForest · caret · rpart · partykit · pROC · ggplot2
    plumber::plumb("src/plumber_api.R")$run(port = 8000)
    ```
 
----
-**Diego Yeferson Quispe Huamani** · Estudiante de Big Data y Ciencia de Datos – Tecsup
-[LinkedIn](https://www.linkedin.com/in/di-yeferson) · [GitHub](https://github.com/di-yeferson)
