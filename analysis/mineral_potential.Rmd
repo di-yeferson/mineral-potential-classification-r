@@ -1,0 +1,686 @@
+---
+title: "Predicción del Potencial de Mineralización con Random Forest"
+subtitle: "Clasificación multiclase de zonas de exploración minera en R"
+author: "Diego Yeferson Quispe Huamani"
+date: "`r meses <- c('enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'); paste(format(Sys.Date(), '%d'), 'de', meses[as.integer(format(Sys.Date(), '%m'))], 'de', format(Sys.Date(), '%Y'))`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    self_contained: true
+  github_document:
+    toc: true
+    toc_depth: 2
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.align = "center", fig.width = 7, fig.height = 5
+)
+```
+
+# 0. Preparación del entorno
+
+## 0.1 Paquetes
+
+```{r paquetes}
+paquetes <- c("randomForest", "rpart", "partykit", "caret", "pROC",
+              "ggplot2", "reshape2", "scales", "e1071")
+
+faltantes <- paquetes[!(paquetes %in% installed.packages()[, "Package"])]
+if (length(faltantes) > 0) {
+  install.packages(faltantes, dependencies = TRUE)
+}
+
+invisible(lapply(paquetes, library, character.only = TRUE))
+```
+
+## 0.2 Procedencia de los datos
+
+El dataset `dataset_mineria.csv` (600 zonas × 7 variables) es **semi-sintético**:
+
+- Las **49 primeras observaciones** corresponden a la vista previa pública del
+  notebook de Kaggle *"Predicción de Potencial de Mineralización"* (Ignacio
+  Zambrano C.), cuyo dataset fue generado por su propio autor.
+- Las **551 observaciones restantes** se generaron de forma reproducible
+  (semilla fija) con un modelo geológico simplificado tipo pórfido, respetando
+  el esquema, los rangos y la distribución de clases del notebook original
+  (Económico 32.8 %, Marginal 41.3 %, Estéril 25.8 %).
+
+Por ello, los resultados demuestran la **metodología de análisis y modelado**;
+no deben interpretarse como evidencia geológica de un yacimiento real.
+
+## 0.3 Carga del dataset
+
+```{r generar-dataset}
+usar_csv_original <- TRUE   # TRUE: usa el CSV incluido en data/ | FALSE: regenera el dataset
+ruta_csv <- "../data/dataset_mineria.csv"
+
+set.seed(2026)
+
+niveles_litologia  <- c("Diorita", "Andesita", "Brecha")
+niveles_alteracion <- c("Silicia", "Argilica", "Propilitica", "Potasica")
+niveles_estructura <- c("Falla_Menor", "Falla_Mayor", "Sin_Estructura")
+niveles_objetivo   <- c("Economico", "Marginal", "Esteril")
+
+if (usar_csv_original && file.exists(ruta_csv)) {
+
+  df <- read.csv(ruta_csv, stringsAsFactors = TRUE)
+
+} else {
+
+  # 1) Las 49 observaciones de la vista previa pública de Kaggle
+  reales_txt <- "
+Diorita,Silicia,Falla_Menor,4,1,3,Economico
+Diorita,Silicia,Falla_Mayor,1,3,3,Esteril
+Andesita,Argilica,Falla_Mayor,4,1,2,Economico
+Diorita,Propilitica,Falla_Mayor,4,2,1,Marginal
+Andesita,Silicia,Falla_Menor,1,2,2,Esteril
+Brecha,Potasica,Falla_Mayor,3,3,1,Economico
+Andesita,Propilitica,Sin_Estructura,3,1,3,Esteril
+Diorita,Silicia,Falla_Menor,4,2,3,Economico
+Andesita,Propilitica,Falla_Mayor,3,3,2,Marginal
+Diorita,Silicia,Sin_Estructura,1,3,1,Esteril
+Brecha,Argilica,Falla_Mayor,1,1,3,Marginal
+Diorita,Argilica,Falla_Menor,1,2,3,Esteril
+Diorita,Argilica,Falla_Mayor,1,1,1,Esteril
+Andesita,Argilica,Falla_Mayor,3,2,1,Economico
+Diorita,Argilica,Falla_Mayor,4,1,2,Economico
+Brecha,Propilitica,Sin_Estructura,2,1,2,Marginal
+Andesita,Argilica,Falla_Menor,4,2,2,Economico
+Brecha,Potasica,Falla_Menor,1,3,1,Economico
+Andesita,Potasica,Sin_Estructura,2,2,3,Economico
+Andesita,Silicia,Sin_Estructura,4,1,3,Marginal
+Andesita,Potasica,Sin_Estructura,4,2,3,Economico
+Andesita,Argilica,Falla_Mayor,1,1,3,Esteril
+Andesita,Silicia,Sin_Estructura,1,2,3,Esteril
+Diorita,Argilica,Falla_Mayor,1,1,3,Esteril
+Brecha,Silicia,Falla_Menor,3,2,3,Marginal
+Brecha,Potasica,Falla_Menor,4,3,1,Economico
+Diorita,Propilitica,Falla_Mayor,4,2,2,Marginal
+Brecha,Propilitica,Falla_Menor,3,3,1,Marginal
+Andesita,Silicia,Sin_Estructura,1,1,3,Esteril
+Andesita,Silicia,Falla_Mayor,3,3,1,Marginal
+Diorita,Argilica,Falla_Menor,3,2,3,Marginal
+Brecha,Potasica,Falla_Menor,3,2,1,Economico
+Diorita,Silicia,Sin_Estructura,2,2,2,Esteril
+Diorita,Potasica,Falla_Mayor,3,3,1,Economico
+Andesita,Silicia,Falla_Mayor,2,3,2,Marginal
+Diorita,Argilica,Falla_Menor,1,3,2,Esteril
+Diorita,Argilica,Falla_Menor,4,3,2,Economico
+Brecha,Silicia,Falla_Menor,3,1,2,Economico
+Brecha,Silicia,Falla_Mayor,1,3,2,Marginal
+Brecha,Argilica,Falla_Menor,4,2,1,Economico
+Diorita,Silicia,Falla_Menor,3,1,3,Marginal
+Andesita,Silicia,Sin_Estructura,2,3,2,Marginal
+Andesita,Propilitica,Sin_Estructura,1,1,2,Esteril
+Andesita,Argilica,Falla_Menor,3,2,1,Marginal
+Diorita,Potasica,Falla_Mayor,3,2,1,Economico
+Diorita,Potasica,Sin_Estructura,1,1,2,Marginal
+Andesita,Argilica,Sin_Estructura,2,3,2,Marginal
+Brecha,Potasica,Falla_Menor,2,1,1,Economico
+Diorita,Potasica,Falla_Menor,3,3,3,Economico
+"
+
+  con <- textConnection(reales_txt)
+  df_reales <- read.csv(con, header = FALSE, strip.white = TRUE,
+                         col.names = c("Litologia", "Alteracion", "Control_Estructura",
+                                       "Densidad_Vetillas", "Profundidad_Nivel",
+                                       "Anomalia_Magnetica", "Potencial_Economico"))
+  close(con)
+
+  n_total  <- 600
+  n_reales <- nrow(df_reales)
+  n_faltan <- n_total - n_reales
+
+  # 2) Generación reproducible de las observaciones restantes
+  
+  genera_fila_objetivo <- function(alteracion, densidad, estructura, anomalia) {
+    # Puntaje geológico continuo (modelo tipo "pórfido"): alteración potásica
+    # y mayor densidad de vetillas elevan el potencial económico; alteración
+    # propilítica (periférica) y baja densidad de vetillas lo reducen.
+    score <- 0
+    score <- score + c(Potasica = 2.1, Silicia = 0.5, Argilica = 0.0, Propilitica = -1.1)[alteracion]
+    score <- score + (densidad - 2.5) * 0.75
+    score <- score + c(Falla_Mayor = 0.35, Falla_Menor = 0.05, Sin_Estructura = -0.25)[estructura]
+    score <- score + (anomalia - 2) * 0.20
+    score <- score + rnorm(1, mean = 0, sd = 1.35)     # ruido geológico/medición
+    score
+  }
+
+  lit  <- sample(niveles_litologia,  n_faltan, replace = TRUE)
+  alt  <- sample(niveles_alteracion, n_faltan, replace = TRUE, prob = c(0.28, 0.28, 0.22, 0.22))
+  est  <- sample(niveles_estructura, n_faltan, replace = TRUE)
+  dens <- sample(1:4, n_faltan, replace = TRUE)
+  prof <- sample(1:3, n_faltan, replace = TRUE)
+  anom <- sample(1:3, n_faltan, replace = TRUE)
+
+  scores <- mapply(genera_fila_objetivo, alt, dens, est, anom)
+
+  # Cortes calibrados por simulación para reproducir, junto con las 49 filas
+  # de Kaggle, la distribución global documentada en el notebook original:
+  # Economico 32.8% (197) 
+  # Marginal 41.3% (248) 
+  # Esteril 25.8% (155)
+  
+  corte_alto <- quantile(scores, probs = 0.595)
+  corte_bajo <- quantile(scores, probs = 0.300)
+
+  obj <- ifelse(scores >= corte_alto, "Economico",
+         ifelse(scores >= corte_bajo, "Marginal", "Esteril"))
+
+  df_sinteticas <- data.frame(
+    Litologia = lit, Alteracion = alt, Control_Estructura = est,
+    Densidad_Vetillas = dens, Profundidad_Nivel = prof, Anomalia_Magnetica = anom,
+    Potencial_Economico = obj, stringsAsFactors = FALSE
+  )
+
+  df <- rbind(df_reales, df_sinteticas)
+
+  # Ajuste fino de proporciones finales a los conteos exactos reportados
+  conteo_objetivo <- c(Economico = 197, Marginal = 248, Esteril = 155)
+  ajustar_conteos <- function(df, objetivo) {
+    actual <- table(df$Potencial_Economico)
+    for (cl in names(objetivo)) {
+      dif <- objetivo[cl] - actual[cl]
+      if (is.na(dif)) dif <- objetivo[cl]
+      if (dif > 0) {
+        sobrantes <- names(actual)[actual > objetivo[names(actual)]]
+        candidatos <- which(df$Potencial_Economico %in% sobrantes &
+                               seq_len(nrow(df)) > n_reales)
+        if (length(candidatos) >= dif) {
+          idx <- sample(candidatos, dif)
+          df$Potencial_Economico[idx] <- cl
+          actual <- table(df$Potencial_Economico)
+        }
+      }
+    }
+    df
+  }
+  df <- ajustar_conteos(df, conteo_objetivo)
+
+  write.csv(df, ruta_csv, row.names = FALSE)
+}
+
+df$Litologia           <- factor(df$Litologia,           levels = niveles_litologia)
+df$Alteracion          <- factor(df$Alteracion,          levels = niveles_alteracion)
+df$Control_Estructura  <- factor(df$Control_Estructura,  levels = niveles_estructura)
+df$Potencial_Economico <- factor(df$Potencial_Economico, levels = niveles_objetivo)
+df$Densidad_Vetillas   <- as.integer(df$Densidad_Vetillas)
+df$Profundidad_Nivel   <- as.integer(df$Profundidad_Nivel)
+df$Anomalia_Magnetica  <- as.integer(df$Anomalia_Magnetica)
+
+cat("Dataset listo:", nrow(df), "filas x", ncol(df), "columnas\n")
+table(df$Potencial_Economico)
+```
+
+***
+
+# 1. Introducción: mapa de proceso
+
+```{r mapa-proceso, fig.width=10, fig.height=3.6}
+par(mar = c(1, 1, 2.5, 1))
+plot(0, 0, type = "n", xlim = c(0, 10), ylim = c(0, 2.6), axes = FALSE,
+     xlab = "", ylab = "",
+     main = "Mapa de proceso: de la exploración geológica a la decisión de negocio")
+
+cajas <- data.frame(
+  x = c(0.3, 2.15, 4.0, 5.85, 7.7),
+  texto = c("1. Datos\ngeológicos de\ncampo\n(litología, alteración,\nestructura, vetillas,\nanomalías)",
+            "2. EDA en R\n(distribuciones,\nasociaciones,\ncalidad de datos)",
+            "3. Modelado en R\n(Random Forest\nmulticlase)",
+            "4. Evaluación en R\n(matriz de confusión,\nF1, AUC-ROC,\nvalidación cruzada)",
+            "5. Decisión de\nnegocio\n(priorizar zonas:\nEconómico /\nMarginal / Estéril)")
+)
+ancho <- 1.55; alto <- 1.55
+
+for (i in seq_len(nrow(cajas))) {
+  rect(cajas$x[i], 0.5, cajas$x[i] + ancho, 0.5 + alto,
+       col = "#EAF3EE", border = "#1B7A43", lwd = 2)
+  text(cajas$x[i] + ancho / 2, 0.5 + alto / 2, cajas$texto[i], cex = 0.62, font = 1)
+  if (i < nrow(cajas)) {
+    arrows(cajas$x[i] + ancho, 0.5 + alto / 2, cajas$x[i + 1] - 0.02, 0.5 + alto / 2,
+           length = 0.12, lwd = 2, col = "#333333")
+  }
+}
+```
+
+***
+
+# 2. EDA: Análisis exploratorio de los datos usando R
+
+```{r eda-paleta}
+paleta <- c("Economico" = "#1B7A43", "Marginal" = "#D9A441", "Esteril" = "#B23A2E")
+tema <- theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), panel.grid.minor = element_blank())
+```
+
+## 2.1 Estructura del dataset
+
+```{r eda-estructura}
+str(df)
+```
+
+## 2.2 Estadísticas descriptivas (variables numéricas)
+
+```{r eda-descriptivas}
+summary(df[, c("Densidad_Vetillas", "Profundidad_Nivel", "Anomalia_Magnetica")])
+sapply(df[, c("Densidad_Vetillas", "Profundidad_Nivel", "Anomalia_Magnetica")], sd)
+```
+
+## 2.3 Frecuencias de variables categóricas
+
+```{r eda-frecuencias}
+for (v in c("Litologia", "Alteracion", "Control_Estructura")) {
+  cat("\n--", v, "--\n")
+  print(table(df[[v]]))
+  print(round(prop.table(table(df[[v]])) * 100, 1))
+}
+```
+
+```{r eda-frecuencias-plot, fig.width=9, fig.height=3.6}
+df_lit <- as.data.frame(table(df$Litologia)); names(df_lit) <- c("Categoria", "n")
+df_alt <- as.data.frame(table(df$Alteracion)); names(df_alt) <- c("Categoria", "n")
+df_est <- as.data.frame(table(df$Control_Estructura)); names(df_est) <- c("Categoria", "n")
+df_lit$Variable <- "Litologia"; df_alt$Variable <- "Alteracion"; df_est$Variable <- "Control_Estructura"
+df_cat <- rbind(df_lit, df_alt, df_est)
+
+ggplot(df_cat, aes(x = Categoria, y = n, fill = Variable)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Variable, scales = "free_x") +
+  labs(title = "Frecuencia de variables geológicas categóricas", x = NULL, y = "N° de zonas") +
+  tema + theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+```{r eda-histogramas, fig.width=8, fig.height=3.2}
+df_num <- reshape2::melt(df[, c("Densidad_Vetillas", "Profundidad_Nivel", "Anomalia_Magnetica")])
+ggplot(df_num, aes(x = value)) +
+  geom_bar(fill = "#2E6F95") +
+  facet_wrap(~variable, scales = "free_x") +
+  labs(title = "Distribución de variables numéricas", x = "Valor", y = "Frecuencia") +
+  tema
+```
+
+## 2.4 Distribución de la variable objetivo
+
+```{r eda-objetivo}
+table(df$Potencial_Economico)
+round(prop.table(table(df$Potencial_Economico)) * 100, 1)
+```
+
+```{r eda-objetivo-plot, fig.width=6, fig.height=4.2}
+ggplot(df, aes(x = Potencial_Economico, fill = Potencial_Economico)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.4) +
+  scale_fill_manual(values = paleta) +
+  labs(title = "Distribución de la variable objetivo",
+       x = "Potencial Económico", y = "N° de zonas") +
+  tema + theme(legend.position = "none")
+```
+
+## 2.5 Valores faltantes y duplicados
+
+```{r eda-calidad}
+colSums(is.na(df))
+sum(duplicated(df))
+```
+
+No hay valores faltantes. Las `r sum(duplicated(df))` filas repetidas no se
+eliminan: con 6 variables discretas solo existen 1,296 perfiles geológicos
+posibles, por lo que es esperable que zonas distintas compartan el mismo perfil.
+
+
+
+
+## 2.6 Correlación entre variables numéricas
+
+```{r eda-correlacion}
+mat_cor <- cor(df[, c("Densidad_Vetillas", "Profundidad_Nivel", "Anomalia_Magnetica")])
+round(mat_cor, 3)
+```
+
+```{r eda-correlacion-plot, fig.width=6, fig.height=5}
+mat_cor_m <- reshape2::melt(mat_cor)
+ggplot(mat_cor_m, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(value, 2))) +
+  scale_fill_gradient2(low = "#B23A2E", mid = "white", high = "#1B7A43", midpoint = 0, limits = c(-1, 1)) +
+  labs(title = "Matriz de correlación\nvariables numéricas", x = NULL, y = NULL, fill = "r") +
+  tema + theme(plot.title = element_text(size = 13, face = "bold"),
+               axis.text.x = element_text(angle = 20, hjust = 1, size = 8))
+```
+
+## 2.7 Asociación entre variables categóricas y la variable objetivo (Chi-cuadrado)
+
+```{r eda-chi2}
+for (v in c("Litologia", "Alteracion", "Control_Estructura")) {
+  tt <- table(df[[v]], df$Potencial_Economico)
+  test <- suppressWarnings(chisq.test(tt))
+  cat(sprintf("%s vs Potencial_Economico: Chi2=%.2f, gl=%d, p-valor=%.4f\n",
+              v, test$statistic, test$parameter, test$p.value))
+}
+```
+
+```{r eda-alteracion-plot, fig.width=7, fig.height=4.5}
+tab_alt <- as.data.frame(prop.table(table(df$Alteracion, df$Potencial_Economico), margin = 1))
+names(tab_alt) <- c("Alteracion", "Potencial_Economico", "Proporcion")
+
+ggplot(tab_alt, aes(x = Alteracion, y = Proporcion, fill = Potencial_Economico)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = paleta) +
+  labs(title = "Potencial económico según tipo de alteración",
+       x = "Alteración hidrotermal", y = "Proporción de zonas", fill = "Potencial") +
+  tema
+```
+
+```{r eda-densidad-plot, fig.width=7, fig.height=4.5}
+tab_dens <- as.data.frame(prop.table(table(df$Densidad_Vetillas, df$Potencial_Economico), margin = 1))
+names(tab_dens) <- c("Densidad_Vetillas", "Potencial_Economico", "Proporcion")
+
+ggplot(tab_dens, aes(x = factor(Densidad_Vetillas), y = Proporcion, fill = Potencial_Economico)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = paleta) +
+  labs(title = "Potencial económico según densidad de vetillas",
+       x = "Densidad de vetillas (1=baja, 4=alta)", y = "Proporción de zonas", fill = "Potencial") +
+  tema
+```
+
+**Conclusión del EDA:** la **Alteración hidrotermal** (Chi² significativo,
+p < 0.001) y la **Densidad de vetillas** concentran la mayor parte de la señal
+predictiva; la Litología y el Control Estructural no muestran asociación
+individual significativa (p > 0.05). La correlación
+lineal entre variables numéricas es prácticamente nula, lo que favorece un
+modelo basado en árboles (sección 3).
+
+***
+
+# 3. Modelado: desarrollo del algoritmo en R
+
+## 3.1 División estratificada train/test (80/20)
+
+```{r modelado-split}
+set.seed(2026)
+idx <- createDataPartition(df$Potencial_Economico, p = 0.8, list = FALSE)
+train <- df[idx, ]
+test  <- df[-idx, ]
+
+cat("Entrenamiento:", nrow(train), "| Prueba:", nrow(test), "\n")
+round(prop.table(table(train$Potencial_Economico)) * 100, 1)
+round(prop.table(table(test$Potencial_Economico)) * 100, 1)
+```
+
+## 3.2 Modelo base de referencia: Árbol de decisión (CART)
+
+```{r modelado-arbol, fig.width=10, fig.height=6}
+modelo_arbol <- rpart(
+  Potencial_Economico ~ Litologia + Alteracion + Control_Estructura +
+    Densidad_Vetillas + Profundidad_Nivel + Anomalia_Magnetica,
+  data = train, method = "class",
+  control = rpart.control(cp = 0.01, minsplit = 20, maxdepth = 5)
+)
+print(modelo_arbol)
+round(modelo_arbol$variable.importance, 2)
+
+plot(as.party(modelo_arbol),
+     main = "Árbol de decisión (CART) - Potencial Económico",
+     gp = gpar(fontsize = 9))
+```
+
+## 3.3 Algoritmo elegido: Random Forest multiclase
+
+Justificación técnica: bagging (reduce varianza/sobreajuste de un árbol
+individual), selección aleatoria de variables en cada división (`mtry`,
+decorrelaciona los árboles), manejo nativo de variables categóricas y
+numéricas sin escalado, importancia de variables integrada, y adecuado para
+clasificación multiclase sin esquemas one-vs-rest manuales.
+
+```{r modelado-rf}
+modelo_rf <- randomForest(
+  Potencial_Economico ~ Litologia + Alteracion + Control_Estructura +
+    Densidad_Vetillas + Profundidad_Nivel + Anomalia_Magnetica,
+  data = train, ntree = 500, mtry = 2, importance = TRUE
+)
+print(modelo_rf)
+round(importance(modelo_rf)[, "MeanDecreaseGini"], 2)
+```
+
+```{r modelado-importancia-plot, fig.width=7, fig.height=4.2}
+imp <- as.data.frame(importance(modelo_rf))
+imp$Variable <- rownames(imp)
+imp <- imp[order(-imp$MeanDecreaseGini), ]
+
+ggplot(imp, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "#2E6F95") +
+  coord_flip() +
+  labs(title = "Importancia de variables - Random Forest",
+       x = NULL, y = "Reducción media del índice de Gini") +
+  theme_minimal(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+```
+
+## 3.4 Selección de hiperparámetros por validación cruzada (10-fold)
+
+```{r modelado-cv}
+ctrl <- trainControl(method = "cv", number = 10)
+set.seed(2026)
+modelo_rf_cv <- train(
+  Potencial_Economico ~ Litologia + Alteracion + Control_Estructura +
+    Densidad_Vetillas + Profundidad_Nivel + Anomalia_Magnetica,
+  data = train, method = "rf",
+  trControl = ctrl,
+  tuneGrid = data.frame(mtry = c(2, 3, 4)),
+  ntree = 300
+)
+print(modelo_rf_cv)
+```
+
+```{r modelado-guardar}
+# Para producción (ver sección 5): guardar el modelo entrenado
+saveRDS(modelo_rf, "../models/modelo_rf.rds")
+```
+
+***
+
+# 4. Evaluación: efectividad de la predicción en R
+
+## 4.1 Matriz de confusión y métricas por clase
+
+```{r evaluacion-predicciones}
+pred_rf_clase <- predict(modelo_rf, test, type = "class")
+pred_rf_prob  <- predict(modelo_rf, test, type = "prob")
+pred_arbol_clase <- predict(modelo_arbol, test, type = "class")
+
+cm_rf    <- confusionMatrix(pred_rf_clase, test$Potencial_Economico)
+cm_arbol <- confusionMatrix(pred_arbol_clase, test$Potencial_Economico)
+
+cm_rf
+```
+
+```{r evaluacion-matriz-plot, fig.width=6.5, fig.height=5}
+cm_df <- as.data.frame(cm_rf$table)
+ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 5) +
+  scale_fill_gradient(low = "#EAF3EE", high = "#1B7A43") +
+  labs(title = "Matriz de confusión - Random Forest",
+       subtitle = "Conjunto de prueba (holdout, 20%)",
+       x = "Clase real", y = "Clase predicha") +
+  theme_minimal(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r evaluacion-baseline}
+clase_mayoritaria <- names(which.max(table(train$Potencial_Economico)))
+pred_baseline <- factor(rep(clase_mayoritaria, nrow(test)), levels = levels(test$Potencial_Economico))
+acc_baseline <- mean(pred_baseline == test$Potencial_Economico)
+cat(sprintf("Baseline (clase mayoritaria = %s): Accuracy = %.3f\n", clase_mayoritaria, acc_baseline))
+```
+
+## 4.2 Comparación con el árbol de decisión base
+
+```{r evaluacion-comparacion-plot, fig.width=7, fig.height=4.5}
+metricas_clase <- as.data.frame(cm_rf$byClass[, c("Precision", "Recall", "F1")])
+
+comp <- data.frame(
+  Modelo = rep(c("Arbol_Decision", "Random_Forest"), each = 3),
+  Metrica = rep(c("Accuracy", "Kappa", "F1_macro"), 2),
+  Valor = c(
+    cm_arbol$overall["Accuracy"], cm_arbol$overall["Kappa"], mean(as.data.frame(cm_arbol$byClass)$F1, na.rm = TRUE),
+    cm_rf$overall["Accuracy"], cm_rf$overall["Kappa"], mean(metricas_clase$F1, na.rm = TRUE)
+  )
+)
+
+ggplot(comp, aes(x = Metrica, y = Valor, fill = Modelo)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(Valor, 2)), position = position_dodge(width = 0.9), vjust = -0.3) +
+  scale_fill_manual(values = c("Arbol_Decision" = "#8C8C8C", "Random_Forest" = "#1B7A43")) +
+  ylim(0, 1) +
+  labs(title = "Comparación de modelos (conjunto de prueba)", x = NULL, y = "Valor") +
+  theme_minimal(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+```
+
+## 4.3 AUC-ROC multiclase (One-vs-Rest)
+
+```{r evaluacion-roc, fig.width=6.5, fig.height=5.5}
+roc_multi <- multiclass.roc(test$Potencial_Economico, pred_rf_prob)
+cat(sprintf("AUC multiclase (Hand & Till): %.3f\n", as.numeric(roc_multi$auc)))
+
+colores <- c(Economico = "#1B7A43", Marginal = "#D9A441", Esteril = "#B23A2E")
+auc_por_clase <- sapply(levels(test$Potencial_Economico), function(cl) {
+  y_bin <- ifelse(test$Potencial_Economico == cl, 1, 0)
+  as.numeric(auc(roc(y_bin, pred_rf_prob[, cl], quiet = TRUE)))
+})
+round(auc_por_clase, 3)
+
+plot(0, 0, type = "n", xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "1 - Especificidad", ylab = "Sensibilidad",
+     main = "Curvas ROC One-vs-Rest - Random Forest")
+abline(0, 1, lty = 2, col = "grey60")
+for (cl in levels(test$Potencial_Economico)) {
+  y_bin <- ifelse(test$Potencial_Economico == cl, 1, 0)
+  r <- roc(y_bin, pred_rf_prob[, cl], quiet = TRUE)
+  lines(1 - r$specificities, r$sensitivities, col = colores[cl], lwd = 2)
+}
+legend("bottomright", legend = paste0(names(colores), " (AUC=", round(auc_por_clase[names(colores)], 2), ")"),
+       col = colores, lwd = 2, bty = "n")
+```
+
+## 4.4 Curva de aprendizaje (overfitting)
+
+```{r evaluacion-curva-aprendizaje, fig.width=7, fig.height=4.5}
+fracciones <- seq(0.2, 1.0, by = 0.1)
+resultados_curva <- data.frame(fraccion = fracciones, accuracy_train = NA, accuracy_test = NA)
+
+for (i in seq_along(fracciones)) {
+  set.seed(100 + i)
+  n_sub <- floor(fracciones[i] * nrow(train))
+  sub_idx <- sample(seq_len(nrow(train)), n_sub)
+  sub_train <- train[sub_idx, ]
+  if (length(unique(sub_train$Potencial_Economico)) < 3) next
+  m <- randomForest(
+    Potencial_Economico ~ Litologia + Alteracion + Control_Estructura +
+      Densidad_Vetillas + Profundidad_Nivel + Anomalia_Magnetica,
+    data = sub_train, ntree = 300, mtry = 2
+  )
+  resultados_curva$accuracy_train[i] <- mean(predict(m, sub_train) == sub_train$Potencial_Economico)
+  resultados_curva$accuracy_test[i]  <- mean(predict(m, test) == test$Potencial_Economico)
+}
+print(round(resultados_curva, 3))
+brecha_final <- tail(resultados_curva$accuracy_train, 1) - tail(resultados_curva$accuracy_test, 1)
+
+curva_m <- reshape2::melt(resultados_curva, id.vars = "fraccion",
+                           measure.vars = c("accuracy_train", "accuracy_test"))
+ggplot(curva_m, aes(x = fraccion, y = value, color = variable)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  scale_color_manual(values = c("accuracy_train" = "#2E6F95", "accuracy_test" = "#B23A2E"),
+                      labels = c("Entrenamiento", "Prueba")) +
+  ylim(0, 1) +
+  labs(title = "Curva de aprendizaje - Random Forest",
+       x = "Fracción del set de entrenamiento utilizada", y = "Accuracy", color = NULL) +
+  theme_minimal(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+```
+
+Con todo el set de entrenamiento, la exactitud en entrenamiento supera a la de
+prueba en `r round(brecha_final * 100, 1)` puntos: es el sobreajuste esperable
+en un Random Forest. La exactitud de prueba se estabiliza a partir del 50 % de
+los datos, por lo que **más datos de campo** serían la principal vía de mejora.
+
+## 4.5 Balance frente a los KPIs de negocio
+
+```{r evaluacion-kpis}
+kpi_acc  <- as.numeric(cm_rf$overall["Accuracy"])
+kpi_prec <- as.numeric(cm_rf$byClass["Class: Economico", "Precision"])
+kpi_rec  <- as.numeric(cm_rf$byClass["Class: Economico", "Recall"])
+kpi_f1   <- as.numeric(cm_rf$byClass["Class: Economico", "F1"])
+kpi_auc  <- mean(auc_por_clase)
+estado   <- function(valor, objetivo) ifelse(valor >= objetivo, "✅ cumple", "❌ no cumple")
+pct      <- function(x) sprintf("%.1f %%", x * 100)
+```
+
+| KPI                          | Objetivo | Resultado | Estado |
+|------------------------------|:--------:|:---------:|:------:|
+| Accuracy global              | ≥ 80 %   | `r pct(kpi_acc)`  | `r estado(kpi_acc, 0.80)`  |
+| Precision (clase Económico)  | ≥ 75 %   | `r pct(kpi_prec)` | `r estado(kpi_prec, 0.75)` |
+| Recall (clase Económico)     | ≥ 80 %   | `r pct(kpi_rec)`  | `r estado(kpi_rec, 0.80)`  |
+| F1-score (clase Económico)   | ≥ 75 %   | `r pct(kpi_f1)`   | `r estado(kpi_f1, 0.75)`   |
+| AUC-ROC promedio (macro)     | ≥ 0.80   | `r sprintf("%.3f", kpi_auc)` | `r estado(kpi_auc, 0.80)` |
+
+El modelo cumple los **KPIs más críticos para el negocio**: detecta el
+`r pct(kpi_rec)` de las zonas realmente económicas (Recall) con un F1 de
+`r pct(kpi_f1)`, y su exactitud global (`r pct(kpi_acc)`) supera ampliamente al
+baseline de la clase mayoritaria (`r pct(acc_baseline)`). La confusión se
+concentra en la clase **Marginal**, que comparte rasgos con las otras dos.
+
+La validación cruzada de 10 particiones estima una exactitud de
+`r pct(max(modelo_rf_cv$results$Accuracy))`; la diferencia con el conjunto de
+prueba se explica por su tamaño reducido (`r nrow(test)` zonas), por lo que la
+cifra de validación cruzada es la estimación más conservadora del desempeño.
+
+***
+
+# 5. Propuesta de despliegue en producción utilizando R
+
+El modelo entrenado (`models/modelo_rf.rds`) se expone como una **API REST con
+`plumber`**, de modo que geólogos y planificadores puedan clasificar nuevas
+zonas desde cualquier sistema:
+
+1. **Entrada:** el equipo de exploración registra las 6 variables geológicas de
+   una zona nueva.
+2. **Predicción:** la API devuelve la clase (Económico / Marginal / Estéril) y
+   la probabilidad de cada una.
+3. **Decisión:** las zonas con mayor probabilidad de ser *Económico* se
+   priorizan en el plan de perforación.
+4. **Mejora continua:** el modelo se reentrena cuando llegan nuevos resultados
+   de perforación, versionando cada `modelo_rf.rds`.
+
+El código de la API está en [`src/plumber_api.R`](../src/plumber_api.R):
+
+```{r despliegue-plumber, code=readLines("../src/plumber_api.R", encoding = "UTF-8"), eval=FALSE}
+```
+
+Para levantarla (desde la raíz del repositorio) y probarla:
+
+```{r despliegue-ejecucion, eval=FALSE}
+plumber::plumb("src/plumber_api.R")$run(port = 8000)
+```
+
+```bash
+curl -X POST "http://localhost:8000/predecir" \
+  -d "Litologia=Brecha&Alteracion=Potasica&Control_Estructura=Falla_Mayor&Densidad_Vetillas=4&Profundidad_Nivel=2&Anomalia_Magnetica=3"
+```
+
+# 6. Conclusiones
+
+- La **alteración hidrotermal** y la **densidad de vetillas** son las variables
+  que más explican el potencial económico, tanto en el EDA como en la
+  importancia del Random Forest.
+- El **Random Forest** supera al árbol de decisión base y al baseline de la
+  clase mayoritaria, y cumple los KPIs de Recall y F1 de la clase *Económico*,
+  los más relevantes para no descartar zonas valiosas.
+- El modelo queda listo para **producción** mediante una API en R (`plumber`),
+  y su principal vía de mejora es incorporar más datos reales de campo.
